@@ -1,0 +1,121 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name=claude:viewport-fit-sides content=cover><style>:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-right:env(safe-area-inset-right,0px);padding-bottom:env(safe-area-inset-bottom,0px);padding-left:env(safe-area-inset-left,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}</style><style>.md-table{overflow-x:auto}@media print{.md-table{overflow-x:visible}}</style><style>:root{color-scheme:light dark;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}}:root[data-theme="dark"]{color-scheme:dark;--md-bg:#0d0d0d;--md-text:rgba(255,255,255,.85);--md-muted:rgba(255,255,255,.6);--md-fill:rgba(255,255,255,.06);--md-fill-strong:rgba(255,255,255,.09);--md-rule:rgba(255,255,255,.14);--md-rule-strong:rgba(255,255,255,.22);--md-link:hsl(210 100% 72%)}:root[data-theme="light"]{color-scheme:light}@media print{:root,:root[data-theme="dark"]{color-scheme:light;--md-bg:#fff;--md-text:rgba(0,0,0,.8);--md-muted:rgba(0,0,0,.6);--md-fill:rgba(0,0,0,.04);--md-fill-strong:rgba(0,0,0,.06);--md-rule:rgba(0,0,0,.1);--md-rule-strong:rgba(0,0,0,.16);--md-link:hsl(210 100% 45%)}}body{background:var(--md-bg);color:var(--md-text);max-width:720px;margin:0 auto;padding:32px;display:flex;flex-direction:column;gap:10px;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro','Segoe UI',sans-serif;overflow-wrap:break-word}body>:first-child{margin-top:0}h1,h2,h3,h4,h5,h6{margin:6px 0 0;line-height:1.25;font-weight:600;text-wrap:balance}h1{font-size:1.35em}h2{font-size:1.15em;color:var(--md-muted)}h3,h4,h5,h6{font-size:1em}p,ul,ol,blockquote,table,pre,hr{margin:0}strong{font-weight:600}a{color:var(--md-link);text-decoration:none}a:hover{text-decoration:underline}ul,ol{display:flex;flex-direction:column;gap:6px;padding-left:22px}ul{list-style:disc}ol{list-style:decimal}:is(li,td,th)>*+:is(p,ul,ol,blockquote){margin-top:6px}blockquote{display:flex;flex-direction:column;gap:10px;border-left:2px solid var(--md-rule);padding-left:10px;color:var(--md-muted)}:not(pre)>code{background:var(--md-fill);padding:1px 3px;border-radius:4px;font:.92em 'SF Mono',ui-monospace,Menlo,Consolas,monospace}a>code{background:none;color:inherit}pre{background:var(--md-fill);padding:10px 12px;border-radius:6px;overflow-x:auto;font:12px/1.5 'SF Mono',ui-monospace,Menlo,Consolas,monospace;margin-block:4px}pre code{background:none;padding:0;font:inherit}table{width:100%;border-collapse:separate;border-spacing:2px;font:inherit}th,td{padding:6px 8px;border-radius:3px;text-align:left;vertical-align:top}th{background:var(--md-fill-strong);font-weight:600}td{background:var(--md-fill)}:is(th,td) :not(pre)>code{background:transparent}hr{border:0;border-top:1px solid var(--md-rule-strong);margin-block:10px}img{max-width:100%;height:auto;border-radius:4px}</style>
+</head><body>
+<pre><code class="language-python">&#34;&#34;&#34;Web analytics ETL: extract -&gt; validate -&gt; load -&gt; alert.
+
+Run daily:  0 6 * * *  python analytics_pipeline.py
+Env: SOURCE=mock|ga4  GA4_PROPERTY, GA4_TOKEN  WAREHOUSE=sqlite|bigquery
+     SQLITE_PATH, BQ_TABLE (project.dataset.table)  SLACK_WEBHOOK
+&#34;&#34;&#34;
+import os, time, logging, sqlite3, datetime as dt
+import numpy as np, pandas as pd, requests
+
+logging.basicConfig(level=logging.INFO, format=&#34;%(asctime)s %(levelname)s %(message)s&#34;)
+log = logging.getLogger(&#34;pipeline&#34;)
+DAYS, DROP_THRESHOLD, Z_LIMIT = 30, 0.30, 3.0
+
+def retry(fn, tries=3, wait=2):
+    for i in range(tries):
+        try: return fn()
+        except Exception as e:
+            log.warning(&#34;attempt %d/%d failed: %s&#34;, i + 1, tries, e)
+            if i == tries - 1: raise
+            time.sleep(wait * 2 ** i)
+
+# ---------- extract ----------
+def extract_ga4():
+    url = f&#34;https://analyticsdata.googleapis.com/v1beta/properties/{os.environ[&#39;GA4_PROPERTY&#39;]}:runReport&#34;
+    body = {&#34;dateRanges&#34;: [{&#34;startDate&#34;: f&#34;{DAYS}daysAgo&#34;, &#34;endDate&#34;: &#34;yesterday&#34;}],
+            &#34;dimensions&#34;: [{&#34;name&#34;: &#34;date&#34;}, {&#34;name&#34;: &#34;sessionDefaultChannelGroup&#34;}],
+            &#34;metrics&#34;: [{&#34;name&#34;: m} for m in (&#34;sessions&#34;, &#34;activeUsers&#34;, &#34;conversions&#34;, &#34;bounceRate&#34;)]}
+    r = requests.post(url, json=body, timeout=30,
+                      headers={&#34;Authorization&#34;: f&#34;Bearer {os.environ[&#39;GA4_TOKEN&#39;]}&#34;})
+    r.raise_for_status()
+    rows = [[d[&#34;value&#34;] for d in x[&#34;dimensionValues&#34;] + x[&#34;metricValues&#34;]] for x in r.json().get(&#34;rows&#34;, [])]
+    return pd.DataFrame(rows, columns=[&#34;date&#34;, &#34;channel&#34;, &#34;sessions&#34;, &#34;users&#34;, &#34;conversions&#34;, &#34;bounce_rate&#34;])
+
+def extract_mock():
+    rng = np.random.default_rng(int(time.time()) // 86400)
+    days = pd.date_range(end=dt.date.today() - dt.timedelta(days=1), periods=DAYS)
+    rows = []
+    for d in days:
+        for ch, base in {&#34;Organic&#34;: 900, &#34;Paid&#34;: 500, &#34;Direct&#34;: 400, &#34;Email&#34;: 150}.items():
+            s = int(rng.normal(base, base * .08))
+            if d == days[-1] and ch == &#34;Organic&#34;: s = int(s * .4)  # simulated outage
+            rows.append([d.strftime(&#34;%Y%m%d&#34;), ch, s, int(s * .8), int(s * .03), rng.uniform(.3, .6)])
+    return pd.DataFrame(rows, columns=[&#34;date&#34;, &#34;channel&#34;, &#34;sessions&#34;, &#34;users&#34;, &#34;conversions&#34;, &#34;bounce_rate&#34;])
+
+# ---------- transform + validate ----------
+def transform(df):
+    df = df.copy()
+    df[&#34;date&#34;] = pd.to_datetime(df[&#34;date&#34;], format=&#34;%Y%m%d&#34;).dt.date.astype(str)
+    for c in [&#34;sessions&#34;, &#34;users&#34;, &#34;conversions&#34;]: df[c] = pd.to_numeric(df[c])
+    df[&#34;bounce_rate&#34;] = pd.to_numeric(df[&#34;bounce_rate&#34;])
+    df[&#34;conv_rate&#34;] = (df.conversions / df.sessions.replace(0, np.nan)).round(4)
+    df[&#34;loaded_at&#34;] = dt.datetime.now(dt.timezone.utc).isoformat(timespec=&#34;seconds&#34;)
+    return df
+
+def validate(df):
+    issues = []
+    if df.empty: issues.append(&#34;extract returned no rows&#34;)
+    if df.duplicated([&#34;date&#34;, &#34;channel&#34;]).any(): issues.append(&#34;duplicate date/channel rows&#34;)
+    if (df[[&#34;sessions&#34;, &#34;users&#34;]] &lt; 0).any().any(): issues.append(&#34;negative counts&#34;)
+    if not df.empty and df.date.max() &lt; str(dt.date.today() - dt.timedelta(days=2)): issues.append(&#34;data is stale&#34;)
+    return issues
+
+# ---------- load (idempotent upsert by date+channel) ----------
+def load(df):
+    if os.getenv(&#34;WAREHOUSE&#34;, &#34;sqlite&#34;) == &#34;bigquery&#34;:
+        from google.cloud import bigquery
+        cl, table = bigquery.Client(), os.environ[&#34;BQ_TABLE&#34;]
+        tmp = table + &#34;_staging&#34;
+        cl.load_table_from_dataframe(df, tmp, job_config=bigquery.LoadJobConfig(write_disposition=&#34;WRITE_TRUNCATE&#34;)).result()
+        cl.query(f&#34;MERGE `{table}` t USING `{tmp}` s ON t.date=s.date AND t.channel=s.channel &#34;
+                 &#34;WHEN MATCHED THEN UPDATE SET sessions=s.sessions, users=s.users, conversions=s.conversions, &#34;
+                 &#34;bounce_rate=s.bounce_rate, conv_rate=s.conv_rate, loaded_at=s.loaded_at &#34;
+                 &#34;WHEN NOT MATCHED THEN INSERT ROW&#34;).result()
+        return
+    con = sqlite3.connect(os.getenv(&#34;SQLITE_PATH&#34;, &#34;warehouse.db&#34;))
+    con.execute(&#34;&#34;&#34;CREATE TABLE IF NOT EXISTS web_daily(date TEXT, channel TEXT, sessions INT, users INT,
+        conversions INT, bounce_rate REAL, conv_rate REAL, loaded_at TEXT, PRIMARY KEY(date, channel))&#34;&#34;&#34;)
+    con.executemany(&#34;INSERT OR REPLACE INTO web_daily VALUES(?,?,?,?,?,?,?,?)&#34;,
+                    df[[&#34;date&#34;, &#34;channel&#34;, &#34;sessions&#34;, &#34;users&#34;, &#34;conversions&#34;, &#34;bounce_rate&#34;, &#34;conv_rate&#34;, &#34;loaded_at&#34;]]
+                    .itertuples(index=False, name=None))
+    con.commit(); con.close()
+
+# ---------- alerts ----------
+def anomalies(df):
+    out, last = [], df.date.max()
+    for ch, g in df.groupby(&#34;channel&#34;):
+        g = g.sort_values(&#34;date&#34;); hist, today = g.iloc[:-1].sessions, g.iloc[-1]
+        mean, sd = hist.tail(14).mean(), hist.tail(14).std() or 1
+        drop, z = 1 - today.sessions / mean, (today.sessions - mean) / sd
+        if drop &gt; DROP_THRESHOLD or abs(z) &gt; Z_LIMIT:
+            out.append(f&#34;{ch} sessions on {last}: {int(today.sessions)} vs 14-day avg {mean:.0f} ({-drop:+.0%}, z={z:.1f})&#34;)
+    return out
+
+def alert(title, lines):
+    msg = f&#34;:rotating_light: *{title}*\n&#34; + &#34;\n&#34;.join(f&#34;• {l}&#34; for l in lines)
+    hook = os.getenv(&#34;SLACK_WEBHOOK&#34;)
+    if hook: retry(lambda: requests.post(hook, json={&#34;text&#34;: msg}, timeout=10).raise_for_status())
+    else: log.error(&#34;ALERT (no SLACK_WEBHOOK set)\n%s&#34;, msg)
+
+def main():
+    try:
+        raw = retry(extract_ga4 if os.getenv(&#34;SOURCE&#34;, &#34;mock&#34;) == &#34;ga4&#34; else extract_mock)
+        df = transform(raw)
+        problems = validate(df)
+        if problems: alert(&#34;Analytics pipeline: data quality failed&#34;, problems); return 1
+        retry(lambda: load(df))
+        log.info(&#34;loaded %d rows&#34;, len(df))
+        found = anomalies(df)
+        if found: alert(&#34;Analytics anomaly detected&#34;, found)
+        return 0
+    except Exception as e:
+        alert(&#34;Analytics pipeline crashed&#34;, [repr(e)]); return 2
+
+if __name__ == &#34;__main__&#34;:
+    raise SystemExit(main())
+
+</code></pre>
+
+</body></html>
